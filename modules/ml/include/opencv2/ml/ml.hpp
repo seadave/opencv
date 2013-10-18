@@ -49,6 +49,7 @@
 #include <map>
 #include <string>
 #include <iostream>
+#include <iomanip>
 
 // Apple defines a check() macro somewhere in the debug headers
 // that interferes with a method definiton in this header
@@ -709,6 +710,48 @@ struct CvDTreeNode
     void set_num_valid(int vi, int n) { if( num_valid ) num_valid[vi] = n; }
 };
 
+/*
+struct CV_EXPORTS_W_MAP CvDTreeTableNode
+{
+    CV_PROP_RW int l_child_idx;
+    CV_PROP_RW int r_child_idx;
+    CV_PROP_RW int class_idx;
+    CV_PROP_RW double value;
+};
+*/
+
+class CvDTreeTable
+{
+public:
+    CvDTreeTable();
+    virtual ~CvDTreeTable();
+
+    //returns index of node in table (used in recursion)
+    int add_subtree(const CvDTreeNode* node, int Tn = 0);
+
+    std::string get_node_table_as_csv() const;
+    std::string get_split_table_as_csv() const;
+
+    int num_nodes;
+    std::vector<int> class_idx;
+    std::vector<double> value;
+    std::vector<int> depth;
+    std::vector<int> sample_count;
+    std::vector<double> node_risk;
+    std::vector<int> prune_seq_idx;
+    std::vector<int> primary_split_idx;
+    std::vector<int> l_child_idx;
+    std::vector<int> r_child_idx;
+
+    int num_splits;
+    std::vector<int> node_idx;
+    std::vector<int> is_primary;
+    std::vector<int> var_idx;
+    std::vector<float> threshold;
+    std::vector<int> inversed;
+    std::vector<float> quality;
+
+};
 
 struct CV_EXPORTS_W_MAP CvDTreeParams
 {
@@ -721,13 +764,14 @@ struct CV_EXPORTS_W_MAP CvDTreeParams
     CV_PROP_RW bool  truncate_pruned_tree;
     CV_PROP_RW float regression_accuracy;
     const float* priors;
+    CV_PROP_RW int force_root_split_var_idx;
 
     CvDTreeParams();
     CvDTreeParams( int max_depth, int min_sample_count,
                    float regression_accuracy, bool use_surrogates,
                    int max_categories, int cv_folds,
                    bool use_1se_rule, bool truncate_pruned_tree,
-                   const float* priors );
+                   const float* priors, int force_root_split_var_idx = -1);
 };
 
 
@@ -895,6 +939,14 @@ public:
     int get_pruned_tree_idx() const;
     CvDTreeTrainData* get_data();
 
+    //NOTE: can't get python interface generator to allow returning this object
+    //CV_WRAP CvDTreeTable get_tree_table() const;
+    CV_WRAP std::vector<std::string> get_tree_tables_as_csv() const;
+    CV_WRAP std::vector<std::string> get_pruned_tree_tables_as_csv() const;
+
+    CV_WRAP int get_max_prune_seq_number() const;
+    CV_WRAP int get_num_splits() const;
+
 protected:
     friend struct cv::DTreeBestSplitFinder;
 
@@ -938,7 +990,7 @@ protected:
     CvDTreeTrainData* data;
 
 public:
-    int pruned_tree_idx;
+    CV_PROP_RW int pruned_tree_idx;
 };
 
 

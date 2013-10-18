@@ -113,6 +113,10 @@ bool CvDTreeTrainData::set_params( const CvDTreeParams& _params )
     if( params.regression_accuracy < 0 )
         CV_ERROR( CV_StsOutOfRange, "params.regression_accuracy should be >= 0" );
 
+//FIXME: was throwing error on valid idxs, track down what var_count is
+//    if( params.force_root_split_var_idx >= var_count )
+//        CV_ERROR( CV_StsOutOfRange, "params.force_root_split_var_idx if not -1 should be in range [0 var_count)" );
+
     ok = true;
 
     __END__;
@@ -1490,20 +1494,21 @@ void CvDTreeTrainData::read_params( CvFileStorage* fs, CvFileNode* node )
 /////////////////////// Decision Tree /////////////////////////
 CvDTreeParams::CvDTreeParams() : max_categories(10), max_depth(INT_MAX), min_sample_count(10),
     cv_folds(10), use_surrogates(true), use_1se_rule(true),
-    truncate_pruned_tree(true), regression_accuracy(0.01f), priors(0)
+    truncate_pruned_tree(true), regression_accuracy(0.01f), priors(0), force_root_split_var_idx(-1)
 {}
 
 CvDTreeParams::CvDTreeParams( int _max_depth, int _min_sample_count,
                               float _regression_accuracy, bool _use_surrogates,
                               int _max_categories, int _cv_folds,
                               bool _use_1se_rule, bool _truncate_pruned_tree,
-                              const float* _priors ) :
+                              const float* _priors, int _force_root_split_var_idx ) :
     max_categories(_max_categories), max_depth(_max_depth),
     min_sample_count(_min_sample_count), cv_folds (_cv_folds),
     use_surrogates(_use_surrogates), use_1se_rule(_use_1se_rule),
     truncate_pruned_tree(_truncate_pruned_tree),
     regression_accuracy(_regression_accuracy),
-    priors(_priors)
+    priors(_priors),
+    force_root_split_var_idx(_force_root_split_var_idx)
 {}
 
 CvDTree::CvDTree()
@@ -1549,12 +1554,181 @@ int CvDTree::get_pruned_tree_idx() const
     return pruned_tree_idx;
 }
 
+CvDTreeTable::CvDTreeTable() 
+{
+    num_nodes = 0;
+    num_splits = 0;
+}
+
+CvDTreeTable::~CvDTreeTable() 
+{
+
+}
+
+// helper function to work around an oddity of the Tn bookkeeping
+int get_pruning_idx(const CvDTreeNode *node) {
+    if (node->Tn != __INT_MAX__)
+        return node->Tn;
+    else if (node->parent)
+        return get_pruning_idx(node->parent);
+    else
+        return -1;
+}
+
+int CvDTreeTable::add_subtree(const CvDTreeNode* node, int Tn)
+{
+    // add node info
+    int cur_node_idx = num_nodes++;
+    bool is_leaf = !node->left || node->Tn <= Tn;
+
+    class_idx.push_back(node->class_idx);
+    value.push_back(node->value);
+    depth.push_back(node->depth);
+    sample_count.push_back(node->sample_count);
+    node_risk.push_back(node->node_risk);
+    prune_seq_idx.push_back(get_pruning_idx(node));
+    primary_split_idx.push_back((!is_leaf && node->split) ? num_splits : -1);
+    l_child_idx.push_back(-1); // NOTE: these will be corrected after recursion
+    r_child_idx.push_back(-1); // NOTE: these will be corrected after recursion
+
+    if (!is_leaf) 
+    {
+        // add split info
+        CvDTreeSplit *split = node->split;
+        bool prim_flag = true;
+        while (split)
+        {
+            num_splits++;
+            node_idx.push_back(cur_node_idx);
+            is_primary.push_back(prim_flag);
+            var_idx.push_back(split->var_idx);
+            threshold.push_back(split->ord.c);
+            inversed.push_back(split->inversed);
+            quality.push_back(split->quality);
+            split = split->next;
+            prim_flag = false;
+        }
+
+        // recurse on children
+        if (node->left) l_child_idx[cur_node_idx] = add_subtree(node->left, Tn);
+        if (node->right) r_child_idx[cur_node_idx] = add_subtree(node->right, Tn);
+    }
+    
+    return cur_node_idx;
+}
+
+std::string CvDTreeTable::get_node_table_as_csv() const
+{
+    std::string sep = ",";
+    std::stringstream ss;
+    ss << "class_idx" << sep;
+    ss << "value" << sep;
+	ss <<  "depth" << sep;
+	ss <<  "sample_count" << sep;
+	ss <<  "node_risk" << sep;
+	ss <<  "prune_seq_idx" << sep;
+	ss <<  "primary_split_idx" << sep;
+	ss <<  "l_child_idx" << sep;
+	ss <<  "r_child_idx" << std::endl;
+    for (int i=0; i<num_nodes; i++) {
+        ss << class_idx[i] << sep;
+        ss <<  std::setprecision(std::numeric_limits<double>::digits10+1) << value[i] << sep;
+        ss <<  depth[i] << sep;
+        ss <<  sample_count[i] << sep;
+        ss <<  std::setprecision(std::numeric_limits<double>::digits10+1) << node_risk[i] << sep;
+        ss <<  prune_seq_idx[i] << sep;
+        ss <<  primary_split_idx[i] << sep;
+        ss <<  l_child_idx[i] << sep;
+        ss <<  r_child_idx[i] << std::endl;
+    }
+    return ss.str();
+}
+
+std::string CvDTreeTable::get_split_table_as_csv() const
+{
+    std::string sep = ",";
+    std::stringstream ss;
+    ss << "node_idx" << sep;
+	ss <<  "is_primary" << sep;
+	ss <<  "var_idx" << sep;
+	ss <<  "threshold" << sep;
+	ss <<  "inversed" << sep;
+	ss <<  "quality" << std::endl;
+    for (int i=0; i<num_splits; i++) {
+        ss << node_idx[i] << sep;
+		ss <<  is_primary[i] << sep;
+		ss <<  var_idx[i] << sep;
+		ss <<  std::setprecision(std::numeric_limits<float>::digits10+1) << threshold[i] << sep;
+		ss <<  inversed[i] << sep;
+		ss <<  std::setprecision(std::numeric_limits<float>::digits10+1) << quality[i] << std::endl;
+    }
+    return ss.str();
+}
+
+/*
+CvDTreeTableNode CvDTreeTable::get_node(int idx) const
+{
+    //TODO: range check on idx
+    return nodes[idx];
+}
+*/
 
 CvDTreeTrainData* CvDTree::get_data()
 {
     return data;
 }
 
+/*
+CvDTreeTable CvDTree::get_tree_table() const
+{
+    CvDTreeTable tbl;
+    tbl.num_nodes = 42;
+    //CvDTreeTable* tbl = new CvDTreeTable();
+    //tbl->num_nodes = 42;
+    //CvDTreeTable tbl;
+    //tbl.num_nodes = 42;
+
+    return tbl;
+}
+*/
+
+std::vector<std::string> CvDTree::get_tree_tables_as_csv() const
+{
+    std::vector<std::string> v;
+    CvDTreeTable tbl; 
+    if (root) tbl.add_subtree(root, 0);
+    v.push_back(tbl.get_node_table_as_csv());
+    v.push_back(tbl.get_split_table_as_csv());
+    return v;
+}
+
+std::vector<std::string> CvDTree::get_pruned_tree_tables_as_csv() const
+{
+    std::vector<std::string> v;
+    CvDTreeTable tbl; 
+    if (root) tbl.add_subtree(root, pruned_tree_idx);
+    v.push_back(tbl.get_node_table_as_csv());
+    v.push_back(tbl.get_split_table_as_csv());
+    return v;
+}
+
+int CvDTree::get_max_prune_seq_number() const
+{
+    return root ? root->Tn : -1;
+}
+
+int count_splits(const CvDTreeNode *node, int Tn = 0) 
+{
+    if (node->left && node->Tn > Tn)
+        return 1 + count_splits(node->left, Tn) + count_splits(node->right, Tn);
+    else
+        return 0;
+}
+
+int CvDTree::get_num_splits() const
+{
+    return count_splits(root, pruned_tree_idx);
+}
 
 bool CvDTree::train( const CvMat* _train_data, int _tflag,
                      const CvMat* _responses, const CvMat* _var_idx,
@@ -1944,7 +2118,10 @@ CvDTreeSplit* CvDTree::find_best_split( CvDTreeNode* node )
 {
     DTreeBestSplitFinder finder( this, node );
 
-    cv::parallel_reduce(cv::BlockedRange(0, data->var_count), finder);
+    if( data->params.force_root_split_var_idx>-1 && node==root )
+        cv::parallel_reduce(cv::BlockedRange(data->params.force_root_split_var_idx, data->params.force_root_split_var_idx+1), finder);
+    else
+        cv::parallel_reduce(cv::BlockedRange(0, data->var_count), finder);
 
     CvDTreeSplit *bestSplit = 0;
     if( finder.bestSplit->quality > 0 )
